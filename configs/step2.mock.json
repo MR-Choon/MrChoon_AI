@@ -1,0 +1,32 @@
+{
+  "run_name": "step2_mock_build",
+  "backend": "mock",
+  "seed": 42,
+  "output_dir": "artifacts/step2/mock",
+  "dataset": {
+    "dataset_id": "CraftJarvis/minecraft-vla-sft",
+    "split": "train",
+    "max_samples": 32,
+    "action_key_hints": ["action", "action_token_ids", "action_ids"]
+  },
+  "text_backbone": {
+    "model_id": "Qwen/Qwen3.5-9B-Instruct",
+    "hidden_size": 64,
+    "vocab_size": 128
+  },
+  "vision_encoder": {
+    "name": "mock_vision_encoder",
+    "input_dim": 48,
+    "hidden_size": 64
+  },
+  "action_head": {
+    "num_actions": 32
+  },
+  "qlora": {
+    "enabled": true,
+    "r": 8,
+    "alpha": 16,
+    "dropout": 0.05,
+    "target_modules": ["q_proj", "v_proj"]
+  }
+}

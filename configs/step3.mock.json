@@ -1,0 +1,24 @@
+{
+  "run_name": "step3_mock_server_test",
+  "seed": 42,
+  "output_dir": "artifacts/step3/mock",
+  "dry_run": true,
+  "server": {
+    "mode": "mock",
+    "host": "127.0.0.1",
+    "port": 25565,
+    "connect_timeout_sec": 2.0,
+    "read_timeout_sec": 2.0,
+    "username": "vla-bot"
+  },
+  "policy": {
+    "source": "step2_report",
+    "step2_report_path": "artifacts/step2/mock/step2_report.json",
+    "default_action_id": 0,
+    "max_action_id": 63
+  },
+  "evaluation": {
+    "episodes": 2,
+    "steps_per_episode": 8
+  }
+}

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minecraft-vla"
+version = "0.1.0"
+description = "Minecraft VLA project with Qwen3.5 + QLoRA workflow"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Mrchoon Team" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+hf = [
+  "accelerate>=1.0.0",
+  "bitsandbytes>=0.43.0",
+  "datasets>=3.0.0",
+  "transformers>=4.50.0",
+  "peft>=0.14.0",
+  "sentencepiece>=0.2.0",
+  "torch>=2.4.0"
+]
+
+dev = [
+  "pytest>=8.2.0"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

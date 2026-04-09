@@ -1,0 +1,52 @@
+{
+  "run_name": "step2_full_train_qwen35_qlora",
+  "seed": 42,
+  "dry_run": true,
+  "dataset": {
+    "dataset_id": "CraftJarvis/minecraft-vla-sft",
+    "train_split": "train",
+    "eval_split": "train",
+    "max_train_samples": 256,
+    "max_eval_samples": 64,
+    "text_field_candidates": ["instruction", "prompt", "text", "obs", "observation"],
+    "action_field_candidates": ["action_token_ids", "actions.action_ids", "action_ids", "actions"],
+    "max_length": 512,
+    "mapping_table_path": "artifacts/step1/mock/token_id_mapping.csv"
+  },
+  "model": {
+    "base_model_id": "Qwen/Qwen3.5-9B-Instruct",
+    "tokenizer_id": "Qwen/Qwen3.5-9B-Instruct",
+    "trust_remote_code": true,
+    "use_4bit": true,
+    "bnb_4bit_quant_type": "nf4",
+    "bnb_4bit_compute_dtype": "bfloat16",
+    "bnb_4bit_use_double_quant": true
+  },
+  "lora": {
+    "enabled": true,
+    "r": 16,
+    "alpha": 32,
+    "dropout": 0.05,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+    "bias": "none"
+  },
+  "runtime": {
+    "output_dir": "result/step2/full-train",
+    "num_train_epochs": 1.0,
+    "per_device_train_batch_size": 1,
+    "per_device_eval_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.0,
+    "warmup_ratio": 0.03,
+    "lr_scheduler_type": "cosine",
+    "logging_steps": 5,
+    "save_steps": 50,
+    "eval_steps": 50,
+    "max_grad_norm": 1.0,
+    "fp16": false,
+    "bf16": true,
+    "gradient_checkpointing": true,
+    "max_steps": 20
+  }
+}
