@@ -5,11 +5,19 @@ import json
 import math
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from minecraft_vla.config import Step2TrainConfig, load_step2_train_config
 from minecraft_vla.utils.io import ensure_dir, write_json
 from minecraft_vla.utils.seed import set_seed
+
+try:  # pragma: no cover - import fallback for environments without torch
+    import torch.nn as _torch_nn  # type: ignore
+
+    _BaseTorchModule = _torch_nn.Module
+except Exception:  # pragma: no cover
+    class _BaseTorchModule:  # type: ignore
+        pass
 
 
 def _require_hf_training_dependencies() -> None:
@@ -19,9 +27,7 @@ def _require_hf_training_dependencies() -> None:
         import torch  # noqa: F401
         import transformers  # noqa: F401
     except ImportError as exc:  # pragma: no cover - depends on environment
-        raise RuntimeError(
-            "Missing training dependencies. Install with: pip install -e .[hf]"
-        ) from exc
+        raise RuntimeError("Missing training dependencies. Install with: pip install -e .[hf]") from exc
 
 
 
@@ -36,8 +42,7 @@ def _resolve_dtype(name: str) -> Any:  # pragma: no cover - requires torch runti
         "float32": torch.float32,
         "fp32": torch.float32,
     }
-    lowered = str(name).strip().lower()
-    return table.get(lowered, torch.bfloat16)
+    return table.get(str(name).strip().lower(), torch.bfloat16)
 
 
 
@@ -57,6 +62,7 @@ def _pick_first_string(row: Dict[str, Any], candidates: Sequence[str]) -> str:
         value = _safe_get(row, key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+
     for value in row.values():
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -78,18 +84,37 @@ def load_action_token_mapping(mapping_table_path: str) -> Dict[int, str]:
     if not mapping_table_path or not path.exists():
         return {}
 
-    result: Dict[int, str] = {}
+    mapping: Dict[int, str] = {}
     with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             try:
                 old_id = int(row.get("old_id", ""))
-                token_str = str(row.get("token_str", ""))
             except ValueError:
                 continue
+            token_str = str(row.get("token_str", ""))
             if token_str:
-                result[old_id] = token_str
-    return result
+                mapping[old_id] = token_str
+    return mapping
+
+
+
+def load_action_id_mapping(mapping_table_path: str) -> Dict[int, int]:
+    path = Path(mapping_table_path)
+    if not mapping_table_path or not path.exists():
+        return {}
+
+    mapping: Dict[int, int] = {}
+    with path.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                old_id = int(row.get("old_id", ""))
+                mapped_new_id = int(row.get("mapped_new_id", ""))
+            except ValueError:
+                continue
+            mapping[old_id] = mapped_new_id
+    return mapping
 
 
 
@@ -135,11 +160,150 @@ def build_training_text(
 def _truncate_dataset(ds: Any, max_samples: int) -> Any:
     if max_samples <= 0:
         return ds
-    size = len(ds)
-    take = min(size, int(max_samples))
+    take = min(len(ds), int(max_samples))
     if take <= 0:
         return ds
     return ds.select(range(take))
+
+
+
+def _collect_numeric_values(value: Any, output: List[float], max_values: int = 4096) -> None:
+    if len(output) >= max_values:
+        return
+
+    if isinstance(value, (int, float)):
+        output.append(float(value))
+        return
+
+    if isinstance(value, list):
+        for item in value:
+            if len(output) >= max_values:
+                break
+            _collect_numeric_values(item, output, max_values=max_values)
+        return
+
+    if isinstance(value, dict):
+        for item in value.values():
+            if len(output) >= max_values:
+                break
+            _collect_numeric_values(item, output, max_values=max_values)
+
+
+
+def _fit_feature_vector(values: Sequence[float], feature_dim: int) -> List[float]:
+    vec = list(values[:feature_dim])
+    if len(vec) < feature_dim:
+        vec.extend([0.0] * (feature_dim - len(vec)))
+    return vec
+
+
+
+def _extract_vision_features(row: Dict[str, Any], candidates: Sequence[str], feature_dim: int) -> List[float]:
+    feature_dim = max(1, int(feature_dim))
+
+    for key in candidates:
+        value = _safe_get(row, key)
+        if value is None:
+            continue
+        nums: List[float] = []
+        _collect_numeric_values(value, nums)
+        if nums:
+            return _fit_feature_vector(nums, feature_dim)
+
+    # Fallback: deterministic minimal signal from text length.
+    fallback = [0.0] * feature_dim
+    text_hint = _pick_first_string(row, ["instruction", "prompt", "text", "obs", "observation"])
+    if text_hint:
+        fallback[0] = float(min(len(text_hint), 4096)) / 4096.0
+    return fallback
+
+
+
+def _extract_action_label(
+    row: Dict[str, Any],
+    action_fields: Sequence[str],
+    old_to_new_action_id: Dict[int, int],
+    strict_action_id_mapping: bool,
+) -> Optional[int]:
+    action_values = _pick_action_values(row, action_fields)
+    for value in action_values:
+        if isinstance(value, int):
+            if strict_action_id_mapping:
+                if value not in old_to_new_action_id:
+                    return None
+                return int(old_to_new_action_id[value])
+            return int(old_to_new_action_id.get(value, value))
+        if isinstance(value, str) and value.strip().isdigit():
+            parsed = int(value.strip())
+            if strict_action_id_mapping:
+                if parsed not in old_to_new_action_id:
+                    return None
+                return int(old_to_new_action_id[parsed])
+            return int(old_to_new_action_id.get(parsed, parsed))
+    return None
+
+
+
+def _validate_step1_artifacts(config: Step2TrainConfig) -> None:
+    if not config.dataset.require_step1_artifacts:
+        return
+
+    mapping_path = Path(config.dataset.mapping_table_path)
+    if not mapping_path.exists():
+        raise RuntimeError(
+            "Step1 mapping table is required but missing. "
+            f"Expected: {mapping_path}"
+        )
+
+    tokenizer_path = Path(config.model.tokenizer_id)
+    if not tokenizer_path.exists():
+        raise RuntimeError(
+            "Step1 tokenizer artifact is required. "
+            "Set model.tokenizer_id to a local tokenizer directory produced by Step1. "
+            f"Current: {config.model.tokenizer_id}"
+        )
+
+
+def _resolve_quantization_config_for_runtime(config: Step2TrainConfig) -> Tuple[Optional[Any], bool, List[str]]:  # pragma: no cover
+    warnings: List[str] = []
+    if not config.model.use_4bit:
+        return None, False, warnings
+
+    import torch  # type: ignore
+
+    if not torch.cuda.is_available():
+        warnings.append("4bit_requested_but_cuda_unavailable_fallback_full_precision")
+        return None, False, warnings
+
+    return _build_quantization_config(config), True, warnings
+
+
+def _resolve_precision_flags(config: Step2TrainConfig) -> Tuple[bool, bool, List[str]]:  # pragma: no cover
+    warnings: List[str] = []
+    import torch  # type: ignore
+
+    fp16 = bool(config.runtime.fp16)
+    bf16 = bool(config.runtime.bf16)
+
+    if fp16 and bf16:
+        warnings.append("both_fp16_and_bf16_requested_using_bf16")
+        fp16 = False
+
+    cuda_available = bool(torch.cuda.is_available())
+
+    if bf16:
+        bf16_supported = bool(cuda_available and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported())
+        if not bf16_supported:
+            warnings.append("bf16_requested_but_not_supported")
+            bf16 = False
+            if cuda_available:
+                fp16 = True
+
+    if fp16 and not cuda_available:
+        warnings.append("fp16_requested_but_cuda_unavailable")
+        fp16 = False
+
+    return fp16, bf16, warnings
 
 
 
@@ -161,44 +325,52 @@ def _build_quantization_config(config: Step2TrainConfig) -> Optional[Any]:  # pr
 def _load_tokenizer(config: Step2TrainConfig) -> Any:  # pragma: no cover
     from transformers import AutoTokenizer  # type: ignore
 
-    tokenizer_id = config.model.tokenizer_id or config.model.base_model_id
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=config.model.trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.model.tokenizer_id,
+        trust_remote_code=config.model.trust_remote_code,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
 
 
 
-def _load_model(config: Step2TrainConfig, quantization_config: Optional[Any]) -> Any:  # pragma: no cover
+def _load_text_backbone(config: Step2TrainConfig, quantization_config: Optional[Any]) -> Any:  # pragma: no cover
     from transformers import AutoModelForCausalLM  # type: ignore
 
-    model_kwargs: Dict[str, Any] = {
+    kwargs: Dict[str, Any] = {
         "trust_remote_code": config.model.trust_remote_code,
         "device_map": "auto",
     }
 
     if quantization_config is not None:
-        model_kwargs["quantization_config"] = quantization_config
+        kwargs["quantization_config"] = quantization_config
     else:
-        model_kwargs["torch_dtype"] = _resolve_dtype(
+        kwargs["torch_dtype"] = _resolve_dtype(
             "bfloat16" if config.runtime.bf16 else "float16" if config.runtime.fp16 else "float32"
         )
 
-    model = AutoModelForCausalLM.from_pretrained(config.model.base_model_id, **model_kwargs)
+    model_id = config.model.base_model_id
+    if config.dry_run and config.model.dry_run_model_id:
+        model_id = config.model.dry_run_model_id
+
+    model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
     if config.runtime.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
     return model
 
 
 
-def _apply_lora_if_enabled(model: Any, config: Step2TrainConfig) -> Any:  # pragma: no cover
+def _apply_lora_if_enabled(text_backbone: Any, config: Step2TrainConfig) -> Any:  # pragma: no cover
     if not config.lora.enabled:
-        return model
+        return text_backbone
 
     from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training  # type: ignore
 
     if config.model.use_4bit:
-        model = prepare_model_for_kbit_training(model)
+        text_backbone = prepare_model_for_kbit_training(text_backbone)
 
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -208,71 +380,292 @@ def _apply_lora_if_enabled(model: Any, config: Step2TrainConfig) -> Any:  # prag
         target_modules=config.lora.target_modules,
         bias=config.lora.bias,
     )
-    model = get_peft_model(model, lora_config)
-    return model
+    return get_peft_model(text_backbone, lora_config)
 
 
+class QwenVisionActionModel(_BaseTorchModule):  # pragma: no cover
+    def __init__(self, text_backbone: Any, vision_feature_dim: int, num_actions: int) -> None:
+        import torch.nn as nn  # type: ignore
 
-def _tokenize_record(
+        super().__init__()
+
+        if num_actions <= 0:
+            raise ValueError("num_actions must be > 0")
+
+        self.text_backbone = text_backbone
+        self.vision_feature_dim = max(1, int(vision_feature_dim))
+        self.num_actions = int(num_actions)
+
+        hidden_size = self._infer_hidden_size(text_backbone)
+        self.vision_projector = nn.Linear(self.vision_feature_dim, hidden_size)
+        self.fusion = nn.Linear(hidden_size * 2, hidden_size)
+        self.fusion_norm = nn.LayerNorm(hidden_size)
+        self.action_head = nn.Linear(hidden_size, self.num_actions)
+
+    @staticmethod
+    def _infer_hidden_size(model: Any) -> int:
+        cfg = getattr(model, "config", None)
+        for attr in ("hidden_size", "n_embd", "d_model"):
+            value = getattr(cfg, attr, None)
+            if isinstance(value, int) and value > 0:
+                return value
+        raise RuntimeError("Unable to infer hidden size from text backbone config")
+
+    def forward(
+        self,
+        input_ids: Any = None,
+        attention_mask: Any = None,
+        vision_inputs: Any = None,
+        labels: Any = None,
+    ) -> Dict[str, Any]:
+        import torch  # type: ignore
+        import torch.nn.functional as F  # type: ignore
+
+        text_outputs = self.text_backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        hidden_states = getattr(text_outputs, "hidden_states", None)
+        if hidden_states is None:
+            raise RuntimeError("Text backbone did not return hidden_states")
+
+        text_state = hidden_states[-1][:, -1, :]
+        if vision_inputs is None:
+            vision_inputs = torch.zeros(
+                (text_state.shape[0], self.vision_feature_dim),
+                dtype=text_state.dtype,
+                device=text_state.device,
+            )
+        vision_inputs = vision_inputs.to(dtype=text_state.dtype, device=text_state.device)
+
+        vision_state = self.vision_projector(vision_inputs)
+        fused = torch.tanh(self.fusion(torch.cat([text_state, vision_state], dim=-1)))
+        fused = self.fusion_norm(fused)
+        logits = self.action_head(fused)
+
+        output: Dict[str, Any] = {"logits": logits}
+        if labels is not None:
+            output["loss"] = F.cross_entropy(logits, labels.long())
+        return output
+
+
+class VLABatchCollator:  # pragma: no cover
+    def __init__(self, tokenizer: Any) -> None:
+        self.tokenizer = tokenizer
+
+    def __call__(self, features: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        import torch  # type: ignore
+
+        text_features = [
+            {
+                "input_ids": item["input_ids"],
+                "attention_mask": item.get("attention_mask", [1] * len(item["input_ids"])),
+            }
+            for item in features
+        ]
+        batch = self.tokenizer.pad(text_features, padding=True, return_tensors="pt")
+        batch["vision_inputs"] = torch.tensor([item["vision_inputs"] for item in features], dtype=torch.float32)
+        batch["labels"] = torch.tensor([int(item["labels"]) for item in features], dtype=torch.long)
+        return batch
+
+
+def _row_to_intermediate(
     row: Dict[str, Any],
-    tokenizer: Any,
-    max_length: int,
     text_fields: Sequence[str],
     action_fields: Sequence[str],
-    id_to_token: Dict[int, str],
+    vision_fields: Sequence[str],
+    vision_dim: int,
+    token_mapping: Dict[int, str],
+    action_id_mapping: Dict[int, int],
+    strict_action_id_mapping: bool,
 ) -> Dict[str, Any]:
-    text = build_training_text(row, text_fields, action_fields, id_to_token)
-    encoded = tokenizer(text, truncation=True, max_length=max_length, padding=False)
-    encoded["labels"] = list(encoded["input_ids"])
-    return encoded
+    action_id = _extract_action_label(
+        row=row,
+        action_fields=action_fields,
+        old_to_new_action_id=action_id_mapping,
+        strict_action_id_mapping=strict_action_id_mapping,
+    )
+
+    return {
+        "text": build_training_text(row, text_fields, action_fields, token_mapping),
+        "action_id": int(action_id) if action_id is not None else -1,
+        "vision_inputs": _extract_vision_features(row, vision_fields, vision_dim),
+    }
 
 
+def _cap_sample_limits(config: Step2TrainConfig) -> Tuple[int, int]:
+    max_train = int(config.dataset.max_train_samples)
+    max_eval = int(config.dataset.max_eval_samples)
 
-def _prepare_datasets(config: Step2TrainConfig, tokenizer: Any, id_to_token: Dict[int, str]) -> Dict[str, Any]:  # pragma: no cover
-    from datasets import load_dataset  # type: ignore
-
-    train_ds = load_dataset(config.dataset.dataset_id, split=config.dataset.train_split)
-    eval_ds = load_dataset(config.dataset.dataset_id, split=config.dataset.eval_split)
-
-    max_train = config.dataset.max_train_samples
-    max_eval = config.dataset.max_eval_samples
     if config.dry_run:
         max_train = min(max_train if max_train > 0 else 256, 256)
         max_eval = min(max_eval if max_eval > 0 else 64, 64)
+    return max_train, max_eval
 
-    train_ds = _truncate_dataset(train_ds, max_train)
-    eval_ds = _truncate_dataset(eval_ds, max_eval)
 
-    remove_columns_train = list(train_ds.column_names)
-    remove_columns_eval = list(eval_ds.column_names)
+def _load_dataset_split_with_limit(dataset_id: str, split_name: str, max_samples: int) -> Any:  # pragma: no cover
+    from datasets import load_dataset  # type: ignore
 
-    train_ds = train_ds.map(
-        lambda row: _tokenize_record(
+    if max_samples > 0:
+        split_spec = f"{split_name}[:{int(max_samples)}]"
+    else:
+        split_spec = split_name
+    return load_dataset(dataset_id, split=split_spec)
+
+
+def _estimate_required_source_size(max_train: int, max_eval: int, holdout_ratio: float) -> int:
+    ratio = max(1e-6, min(1.0 - 1e-6, float(holdout_ratio)))
+
+    if max_train > 0 and max_eval > 0:
+        return int(max_train + max_eval)
+    if max_train > 0:
+        return int(math.ceil(max_train / (1.0 - ratio)))
+    if max_eval > 0:
+        return int(math.ceil(max_eval / ratio))
+    return 0
+
+
+def _prepare_raw_splits(config: Step2TrainConfig) -> Tuple[Any, Any]:  # pragma: no cover
+    max_train, max_eval = _cap_sample_limits(config)
+
+    if config.dataset.eval_split != config.dataset.train_split:
+        train_ds = _load_dataset_split_with_limit(
+            dataset_id=config.dataset.dataset_id,
+            split_name=config.dataset.train_split,
+            max_samples=max_train,
+        )
+        eval_ds = _load_dataset_split_with_limit(
+            dataset_id=config.dataset.dataset_id,
+            split_name=config.dataset.eval_split,
+            max_samples=max_eval,
+        )
+        return train_ds, eval_ds
+
+    if config.dataset.enforce_distinct_eval_split:
+        ratio = float(config.dataset.eval_holdout_ratio)
+        if ratio <= 0.0 or ratio >= 1.0:
+            raise ValueError("eval_holdout_ratio must be in (0, 1) when enforce_distinct_eval_split=true")
+
+        source_limit = _estimate_required_source_size(max_train, max_eval, ratio)
+        source_ds = _load_dataset_split_with_limit(
+            dataset_id=config.dataset.dataset_id,
+            split_name=config.dataset.train_split,
+            max_samples=source_limit,
+        )
+        split_ds = source_ds.train_test_split(test_size=ratio, shuffle=True, seed=config.seed)
+        train_ds = _truncate_dataset(split_ds["train"], max_train)
+        eval_ds = _truncate_dataset(split_ds["test"], max_eval)
+        return train_ds, eval_ds
+
+    shared_limit = max(max_train, max_eval)
+    shared_ds = _load_dataset_split_with_limit(
+        dataset_id=config.dataset.dataset_id,
+        split_name=config.dataset.train_split,
+        max_samples=shared_limit,
+    )
+    train_ds = _truncate_dataset(shared_ds, max_train)
+    eval_ds = _truncate_dataset(shared_ds, max_eval)
+    return train_ds, eval_ds
+
+
+
+def _build_intermediate_dataset(
+    ds: Any,
+    split_name: str,
+    text_fields: Sequence[str],
+    action_fields: Sequence[str],
+    vision_fields: Sequence[str],
+    vision_dim: int,
+    token_mapping: Dict[int, str],
+    action_id_mapping: Dict[int, int],
+    strict_action_id_mapping: bool,
+) -> Any:  # pragma: no cover
+    original_columns = list(ds.column_names)
+
+    mapped = ds.map(
+        lambda row: _row_to_intermediate(
             row=row,
-            tokenizer=tokenizer,
-            max_length=config.dataset.max_length,
-            text_fields=config.dataset.text_field_candidates,
-            action_fields=config.dataset.action_field_candidates,
-            id_to_token=id_to_token,
+            text_fields=text_fields,
+            action_fields=action_fields,
+            vision_fields=vision_fields,
+            vision_dim=vision_dim,
+            token_mapping=token_mapping,
+            action_id_mapping=action_id_mapping,
+            strict_action_id_mapping=strict_action_id_mapping,
         ),
-        remove_columns=remove_columns_train,
-        desc="Tokenizing train split",
+        remove_columns=original_columns,
+        desc=f"Building {split_name} multimodal examples",
     )
 
-    eval_ds = eval_ds.map(
-        lambda row: _tokenize_record(
-            row=row,
-            tokenizer=tokenizer,
-            max_length=config.dataset.max_length,
-            text_fields=config.dataset.text_field_candidates,
-            action_fields=config.dataset.action_field_candidates,
-            id_to_token=id_to_token,
-        ),
-        remove_columns=remove_columns_eval,
-        desc="Tokenizing eval split",
+    mapped = mapped.filter(lambda row: int(row["action_id"]) >= 0, desc=f"Filtering {split_name} invalid actions")
+    return mapped
+
+
+
+def _build_label_maps(train_ds: Any) -> Tuple[Dict[int, int], Dict[int, int]]:
+    action_ids = [int(x) for x in train_ds["action_id"]]
+    unique_ids = sorted(set(action_ids))
+    if not unique_ids:
+        raise RuntimeError("No valid action labels found in training split")
+
+    action_id_to_label = {action_id: idx for idx, action_id in enumerate(unique_ids)}
+    label_to_action_id = {idx: action_id for action_id, idx in action_id_to_label.items()}
+    return action_id_to_label, label_to_action_id
+
+
+
+def _finalize_dataset(ds: Any, tokenizer: Any, max_length: int, action_id_to_label: Dict[int, int], split_name: str) -> Any:  # pragma: no cover
+    remove_columns = list(ds.column_names)
+
+    finalized = ds.map(
+        lambda row: {
+            **tokenizer(row["text"], truncation=True, max_length=max_length, padding=False),
+            "vision_inputs": row["vision_inputs"],
+            "labels": int(action_id_to_label.get(int(row["action_id"]), -1)),
+        },
+        remove_columns=remove_columns,
+        desc=f"Tokenizing {split_name} split",
     )
 
-    return {"train": train_ds, "eval": eval_ds}
+    finalized = finalized.filter(lambda row: int(row["labels"]) >= 0, desc=f"Filtering {split_name} unknown labels")
+    return finalized
+
+
+
+def _compute_classification_metrics(eval_pred: Any) -> Dict[str, float]:  # pragma: no cover
+    try:
+        import numpy as np  # type: ignore
+
+        logits, labels = eval_pred
+        if isinstance(logits, tuple):
+            logits = logits[0]
+        preds = np.argmax(logits, axis=-1)
+        accuracy = float((preds == labels).mean()) if len(labels) > 0 else 0.0
+        return {"accuracy": accuracy}
+    except Exception:
+        return {}
+
+
+def _get_trainer_components() -> Tuple[Any, Any]:  # pragma: no cover
+    from transformers import Trainer, TrainingArguments  # type: ignore
+
+    return Trainer, TrainingArguments
+
+
+def _resolve_report_targets(config: Step2TrainConfig) -> List[str]:
+    targets: List[str] = []
+    for item in config.runtime.report_to:
+        name = str(item).strip().lower()
+        if not name:
+            continue
+        if name in {"none", "off", "disable", "disabled"}:
+            return []
+        if name not in targets:
+            targets.append(name)
+    return targets
+
 
 
 def collect_model_parameter_stats(model: Any) -> Dict[str, Any]:
@@ -298,6 +691,7 @@ def collect_model_parameter_stats(model: Any) -> Dict[str, Any]:
     }
 
 
+
 def build_model_analysis(
     config: Step2TrainConfig,
     train_metrics: Dict[str, Any],
@@ -306,17 +700,15 @@ def build_model_analysis(
 ) -> Dict[str, Any]:
     train_loss = train_metrics.get("train_loss")
     eval_loss = eval_metrics.get("eval_loss")
-
-    if isinstance(eval_loss, (int, float)):
-        perplexity = float(math.exp(float(eval_loss))) if float(eval_loss) < 20 else float("inf")
-    else:
-        perplexity = None
+    eval_accuracy = eval_metrics.get("eval_accuracy")
 
     quality_flags: List[str] = []
     if isinstance(train_loss, (int, float)) and float(train_loss) > 5.0:
         quality_flags.append("high_train_loss")
     if isinstance(eval_loss, (int, float)) and float(eval_loss) > 5.0:
         quality_flags.append("high_eval_loss")
+    if isinstance(eval_accuracy, (int, float)) and float(eval_accuracy) < 0.2:
+        quality_flags.append("low_eval_accuracy")
     if model_stats.get("trainable_ratio", 0.0) <= 0.0:
         quality_flags.append("no_trainable_parameters")
 
@@ -327,22 +719,25 @@ def build_model_analysis(
             "use_4bit": config.model.use_4bit,
             "lora_enabled": config.lora.enabled,
             "lora_target_modules": config.lora.target_modules,
+            "architecture": "text_backbone + vision_projector + fusion + action_head",
         },
         "dataset": {
             "dataset_id": config.dataset.dataset_id,
             "train_split": config.dataset.train_split,
             "eval_split": config.dataset.eval_split,
+            "enforce_distinct_eval_split": config.dataset.enforce_distinct_eval_split,
         },
         "metrics": {
             "train_loss": train_loss,
             "eval_loss": eval_loss,
-            "eval_perplexity": perplexity,
+            "eval_accuracy": eval_accuracy,
+            "legacy_eval_perplexity": float(math.exp(float(eval_loss))) if isinstance(eval_loss, (int, float)) and float(eval_loss) < 20 else None,
         },
         "parameter_stats": model_stats,
         "quality_flags": quality_flags,
         "notes": [
-            "This report is generated after training and is intended for quick run-level diagnostics.",
-            "Use trainer_state.json and checkpoints for detailed step-by-step analysis.",
+            "This report is generated after multimodal action training.",
+            "See action_label_map.json for label-to-action-id mapping.",
         ],
     }
 
@@ -350,61 +745,133 @@ def build_model_analysis(
 
 def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  # pragma: no cover
     _require_hf_training_dependencies()
+    _validate_step1_artifacts(config)
     set_seed(config.seed)
 
     out_dir = ensure_dir(config.runtime.output_dir)
-    id_to_token = load_action_token_mapping(config.dataset.mapping_table_path)
+
+    token_mapping = load_action_token_mapping(config.dataset.mapping_table_path)
+    action_id_mapping = load_action_id_mapping(config.dataset.mapping_table_path)
+
+    if config.dataset.require_step1_artifacts and not action_id_mapping:
+        raise RuntimeError("Step1 mapping table is present but has no usable action-id mappings")
+
+    runtime_warnings: List[str] = []
 
     tokenizer = _load_tokenizer(config)
-    quantization_config = _build_quantization_config(config)
-    model = _load_model(config, quantization_config)
-    model = _apply_lora_if_enabled(model, config)
+    quantization_config, quantization_enabled, quant_warnings = _resolve_quantization_config_for_runtime(config)
+    runtime_warnings.extend(quant_warnings)
 
-    datasets = _prepare_datasets(config, tokenizer, id_to_token)
-    train_ds = datasets["train"]
-    eval_ds = datasets["eval"]
+    resolved_fp16, resolved_bf16, precision_warnings = _resolve_precision_flags(config)
+    runtime_warnings.extend(precision_warnings)
 
-    from transformers import DataCollatorForLanguageModeling, Trainer, TrainingArguments  # type: ignore
+    text_backbone = _load_text_backbone(config, quantization_config)
+    text_backbone = _apply_lora_if_enabled(text_backbone, config)
+
+    raw_train_ds, raw_eval_ds = _prepare_raw_splits(config)
+    train_intermediate = _build_intermediate_dataset(
+        ds=raw_train_ds,
+        split_name="train",
+        text_fields=config.dataset.text_field_candidates,
+        action_fields=config.dataset.action_field_candidates,
+        vision_fields=config.dataset.vision_field_candidates,
+        vision_dim=config.dataset.vision_feature_dim,
+        token_mapping=token_mapping,
+        action_id_mapping=action_id_mapping,
+        strict_action_id_mapping=config.dataset.strict_action_id_mapping,
+    )
+    eval_intermediate = _build_intermediate_dataset(
+        ds=raw_eval_ds,
+        split_name="eval",
+        text_fields=config.dataset.text_field_candidates,
+        action_fields=config.dataset.action_field_candidates,
+        vision_fields=config.dataset.vision_field_candidates,
+        vision_dim=config.dataset.vision_feature_dim,
+        token_mapping=token_mapping,
+        action_id_mapping=action_id_mapping,
+        strict_action_id_mapping=config.dataset.strict_action_id_mapping,
+    )
+
+    action_id_to_label, label_to_action_id = _build_label_maps(train_intermediate)
+
+    train_ds = _finalize_dataset(
+        ds=train_intermediate,
+        tokenizer=tokenizer,
+        max_length=config.dataset.max_length,
+        action_id_to_label=action_id_to_label,
+        split_name="train",
+    )
+    eval_ds = _finalize_dataset(
+        ds=eval_intermediate,
+        tokenizer=tokenizer,
+        max_length=config.dataset.max_length,
+        action_id_to_label=action_id_to_label,
+        split_name="eval",
+    )
+
+    model = QwenVisionActionModel(
+        text_backbone=text_backbone,
+        vision_feature_dim=config.dataset.vision_feature_dim,
+        num_actions=len(action_id_to_label),
+    )
+
+    Trainer, TrainingArguments = _get_trainer_components()
 
     evaluation_strategy = "steps" if len(eval_ds) > 0 else "no"
     max_steps = config.runtime.max_steps
     if config.dry_run and max_steps <= 0:
         max_steps = 10
 
-    args = TrainingArguments(
-        output_dir=str(out_dir),
-        run_name=config.run_name,
-        num_train_epochs=config.runtime.num_train_epochs,
-        per_device_train_batch_size=config.runtime.per_device_train_batch_size,
-        per_device_eval_batch_size=config.runtime.per_device_eval_batch_size,
-        gradient_accumulation_steps=config.runtime.gradient_accumulation_steps,
-        learning_rate=config.runtime.learning_rate,
-        weight_decay=config.runtime.weight_decay,
-        warmup_ratio=config.runtime.warmup_ratio,
-        lr_scheduler_type=config.runtime.lr_scheduler_type,
-        logging_steps=config.runtime.logging_steps,
-        save_steps=config.runtime.save_steps,
-        eval_steps=config.runtime.eval_steps,
-        max_grad_norm=config.runtime.max_grad_norm,
-        fp16=config.runtime.fp16,
-        bf16=config.runtime.bf16,
-        gradient_checkpointing=config.runtime.gradient_checkpointing,
-        evaluation_strategy=evaluation_strategy,
-        save_strategy="steps",
-        max_steps=max_steps,
-        report_to=[],
-        remove_unused_columns=False,
-        dataloader_pin_memory=False,
-    )
+    report_to = _resolve_report_targets(config)
+    logging_dir = config.runtime.logging_dir.strip() if config.runtime.logging_dir else ""
+    if not logging_dir:
+        logging_dir = str(Path(out_dir) / "tb")
 
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    training_args_kwargs: Dict[str, Any] = {
+        "output_dir": str(out_dir),
+        "run_name": config.run_name,
+        "num_train_epochs": config.runtime.num_train_epochs,
+        "per_device_train_batch_size": config.runtime.per_device_train_batch_size,
+        "per_device_eval_batch_size": config.runtime.per_device_eval_batch_size,
+        "gradient_accumulation_steps": config.runtime.gradient_accumulation_steps,
+        "learning_rate": config.runtime.learning_rate,
+        "weight_decay": config.runtime.weight_decay,
+        "warmup_ratio": config.runtime.warmup_ratio,
+        "lr_scheduler_type": config.runtime.lr_scheduler_type,
+        "logging_steps": config.runtime.logging_steps,
+        "save_steps": config.runtime.save_steps,
+        "eval_steps": config.runtime.eval_steps,
+        "max_grad_norm": config.runtime.max_grad_norm,
+        "fp16": resolved_fp16,
+        "bf16": resolved_bf16,
+        "gradient_checkpointing": config.runtime.gradient_checkpointing,
+        "evaluation_strategy": evaluation_strategy,
+        "save_strategy": "steps",
+        "max_steps": max_steps,
+        "report_to": report_to,
+        "logging_dir": logging_dir,
+        "remove_unused_columns": False,
+        "dataloader_pin_memory": False,
+    }
+
+    try:
+        args = TrainingArguments(**training_args_kwargs)
+    except TypeError as exc:
+        if "evaluation_strategy" in str(exc):
+            training_args_kwargs.pop("evaluation_strategy", None)
+            training_args_kwargs["eval_strategy"] = evaluation_strategy
+            args = TrainingArguments(**training_args_kwargs)
+        else:
+            raise
+
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         tokenizer=tokenizer,
-        data_collator=collator,
+        data_collator=VLABatchCollator(tokenizer),
+        compute_metrics=_compute_classification_metrics if evaluation_strategy != "no" else None,
     )
 
     train_result = trainer.train()
@@ -415,14 +882,44 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
     tokenizer_dir = Path(out_dir) / "tokenizer"
     tokenizer.save_pretrained(tokenizer_dir)
 
-    if config.lora.enabled and hasattr(model, "save_pretrained"):
-        adapter_dir = Path(out_dir) / "lora_adapter"
-        model.save_pretrained(adapter_dir)
-        model_artifact = str(adapter_dir)
+    if config.lora.enabled and hasattr(model.text_backbone, "save_pretrained"):
+        text_backbone_dir = Path(out_dir) / "text_backbone_lora"
+        model.text_backbone.save_pretrained(text_backbone_dir)
+        text_model_artifact = str(text_backbone_dir)
+    elif hasattr(model.text_backbone, "save_pretrained"):
+        text_backbone_dir = Path(out_dir) / "text_backbone_full"
+        model.text_backbone.save_pretrained(text_backbone_dir)
+        text_model_artifact = str(text_backbone_dir)
     else:
-        model_dir = Path(out_dir) / "full_model"
-        trainer.save_model(model_dir)
-        model_artifact = str(model_dir)
+        import torch  # type: ignore
+
+        state_path = Path(out_dir) / "text_backbone_state.pt"
+        torch.save(model.text_backbone.state_dict(), state_path)
+        text_model_artifact = str(state_path)
+
+    import torch  # type: ignore
+
+    vla_head_path = Path(out_dir) / "vla_head_state.pt"
+    torch.save(
+        {
+            "vision_projector": model.vision_projector.state_dict(),
+            "fusion": model.fusion.state_dict(),
+            "fusion_norm": model.fusion_norm.state_dict(),
+            "action_head": model.action_head.state_dict(),
+            "num_actions": model.num_actions,
+            "vision_feature_dim": model.vision_feature_dim,
+        },
+        vla_head_path,
+    )
+
+    action_label_map_path = Path(out_dir) / "action_label_map.json"
+    write_json(
+        action_label_map_path,
+        {
+            "action_id_to_label": {str(k): int(v) for k, v in action_id_to_label.items()},
+            "label_to_action_id": {str(k): int(v) for k, v in label_to_action_id.items()},
+        },
+    )
 
     trainer.state.save_to_json(str(Path(out_dir) / "trainer_state.json"))
 
@@ -443,13 +940,22 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
             "eval_split": config.dataset.eval_split,
             "train_size": len(train_ds),
             "eval_size": len(eval_ds),
+            "num_action_classes": len(action_id_to_label),
         },
         "model": {
             "base_model_id": config.model.base_model_id,
+            "effective_base_model_id": config.model.dry_run_model_id if config.dry_run and config.model.dry_run_model_id else config.model.base_model_id,
             "tokenizer_id": config.model.tokenizer_id,
             "use_4bit": config.model.use_4bit,
+            "effective_4bit": quantization_enabled,
             "lora_enabled": config.lora.enabled,
             "parameter_stats": model_stats,
+            "architecture": "qwen_text_backbone + vision_projector + action_head",
+        },
+        "runtime_warnings": runtime_warnings,
+        "logging": {
+            "report_to": report_to,
+            "logging_dir": logging_dir,
         },
         "metrics": {
             "train": train_metrics,
@@ -457,7 +963,9 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
         },
         "artifacts": {
             "output_dir": str(out_dir),
-            "model_artifact": model_artifact,
+            "text_model_artifact": text_model_artifact,
+            "vla_head_state": str(vla_head_path),
+            "action_label_map": str(action_label_map_path),
             "tokenizer_dir": str(tokenizer_dir),
             "trainer_state": str(Path(out_dir) / "trainer_state.json"),
             "model_analysis": str(Path(out_dir) / "model_analysis.json"),

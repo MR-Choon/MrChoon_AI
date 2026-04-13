@@ -11,6 +11,7 @@ from minecraft_vla.training.step2_full_train_pipeline import (
     build_model_analysis,
     build_training_text,
     collect_model_parameter_stats,
+    load_action_id_mapping,
     load_action_token_mapping,
 )
 
@@ -39,6 +40,11 @@ def test_build_training_text_with_action_mapping() -> None:
 
 def test_load_action_token_mapping_missing_file() -> None:
     mapping = load_action_token_mapping("/tmp/not_existing_mapping_file.csv")
+    assert mapping == {}
+
+
+def test_load_action_id_mapping_missing_file() -> None:
+    mapping = load_action_id_mapping("/tmp/not_existing_mapping_file.csv")
     assert mapping == {}
 
 
@@ -76,8 +82,14 @@ def test_build_model_analysis() -> None:
             max_eval_samples=2,
             text_field_candidates=["text"],
             action_field_candidates=["action_token_ids"],
+            vision_field_candidates=["vision_features"],
+            vision_feature_dim=8,
             max_length=128,
             mapping_table_path="",
+            eval_holdout_ratio=0.1,
+            enforce_distinct_eval_split=True,
+            require_step1_artifacts=False,
+            strict_action_id_mapping=True,
         ),
         model=Step2TrainModelConfig(
             base_model_id="base",
@@ -114,6 +126,8 @@ def test_build_model_analysis() -> None:
             bf16=True,
             gradient_checkpointing=True,
             max_steps=5,
+            report_to=["tensorboard"],
+            logging_dir="result/step2/full-train/tb",
         ),
     )
 

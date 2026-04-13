@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -119,8 +119,14 @@ class Step2TrainDatasetConfig:
     max_eval_samples: int
     text_field_candidates: List[str]
     action_field_candidates: List[str]
-    max_length: int
-    mapping_table_path: str
+    vision_field_candidates: List[str] = field(default_factory=list)
+    vision_feature_dim: int = 48
+    max_length: int = 512
+    mapping_table_path: str = ""
+    eval_holdout_ratio: float = 0.1
+    enforce_distinct_eval_split: bool = True
+    require_step1_artifacts: bool = True
+    strict_action_id_mapping: bool = True
 
 
 @dataclass
@@ -132,6 +138,7 @@ class Step2TrainModelConfig:
     bnb_4bit_quant_type: str
     bnb_4bit_compute_dtype: str
     bnb_4bit_use_double_quant: bool
+    dry_run_model_id: str = ""
 
 
 @dataclass
@@ -163,6 +170,8 @@ class Step2TrainRuntimeConfig:
     bf16: bool
     gradient_checkpointing: bool
     max_steps: int
+    report_to: List[str] = field(default_factory=lambda: ["tensorboard"])
+    logging_dir: str = ""
 
 
 @dataclass
