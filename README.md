@@ -68,6 +68,11 @@ Notes:
 - Eval leakage is blocked by default via holdout split when train/eval split are identical.
 - Model artifacts are written under `result/step2/full-train` by default.
 - Run-level analysis is saved to `result/step2/full-train/model_analysis.json`.
+- Tokenized train/eval datasets can be saved with `dataset.save_dataset=true` and reused with `dataset.use_saved_dataset=true`.
+
+Reuse saved dataset (after the first run):
+
+python scripts/train_step2_full.py --config configs/step2.full-train.hf.reuse.json
 - Training graphs can be enabled with `runtime.report_to` in config (default: `tensorboard`).
 - TensorBoard event logs are written to `runtime.logging_dir` (default: `result/step2/full-train/tb`).
 

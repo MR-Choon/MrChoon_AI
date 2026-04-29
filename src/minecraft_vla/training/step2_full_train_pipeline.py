@@ -248,12 +248,13 @@ def _validate_step1_artifacts(config: Step2TrainConfig) -> None:
     if not config.dataset.require_step1_artifacts:
         return
 
-    mapping_path = Path(config.dataset.mapping_table_path)
-    if not mapping_path.exists():
-        raise RuntimeError(
-            "Step1 mapping table is required but missing. "
-            f"Expected: {mapping_path}"
-        )
+    if not config.dataset.use_saved_dataset:
+        mapping_path = Path(config.dataset.mapping_table_path)
+        if not mapping_path.exists():
+            raise RuntimeError(
+                "Step1 mapping table is required but missing. "
+                f"Expected: {mapping_path}"
+            )
 
     tokenizer_path = Path(config.model.tokenizer_id)
     if not tokenizer_path.exists():
@@ -570,6 +571,69 @@ def _prepare_raw_splits(config: Step2TrainConfig) -> Tuple[Any, Any]:  # pragma:
     return train_ds, eval_ds
 
 
+def _resolve_saved_dataset_dir(config: Step2TrainConfig) -> Path:
+    if config.dataset.saved_dataset_dir:
+        return Path(config.dataset.saved_dataset_dir)
+    return Path(config.runtime.output_dir) / "saved_dataset"
+
+
+def _save_dataset_splits(
+    config: Step2TrainConfig,
+    train_ds: Any,
+    eval_ds: Any,
+    action_id_to_label: Dict[int, int],
+    label_to_action_id: Dict[int, int],
+) -> None:  # pragma: no cover
+    if not config.dataset.save_dataset:
+        return
+
+    if not hasattr(train_ds, "save_to_disk") or not hasattr(eval_ds, "save_to_disk"):
+        raise RuntimeError("Dataset saving requested but dataset object does not support save_to_disk")
+
+    base_dir = _resolve_saved_dataset_dir(config)
+    train_dir = base_dir / "train"
+    eval_dir = base_dir / "eval"
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    train_ds.save_to_disk(str(train_dir))
+    eval_ds.save_to_disk(str(eval_dir))
+
+    write_json(
+        base_dir / "label_map.json",
+        {
+            "action_id_to_label": {str(k): int(v) for k, v in action_id_to_label.items()},
+            "label_to_action_id": {str(k): int(v) for k, v in label_to_action_id.items()},
+        },
+    )
+
+
+def _load_saved_datasets(config: Step2TrainConfig) -> Tuple[Any, Any, Dict[int, int], Dict[int, int]]:  # pragma: no cover
+    from datasets import load_from_disk  # type: ignore
+
+    base_dir = _resolve_saved_dataset_dir(config)
+    train_dir = base_dir / "train"
+    eval_dir = base_dir / "eval"
+    label_map_path = base_dir / "label_map.json"
+
+    if not train_dir.exists() or not eval_dir.exists():
+        raise RuntimeError(f"Saved dataset not found under: {base_dir}")
+    if not label_map_path.exists():
+        raise RuntimeError(f"Saved label map not found: {label_map_path}")
+
+    train_ds = load_from_disk(str(train_dir))
+    eval_ds = load_from_disk(str(eval_dir))
+
+    with label_map_path.open("r", encoding="utf-8") as f:
+        label_map = json.load(f)
+
+    action_id_to_label = {int(k): int(v) for k, v in label_map.get("action_id_to_label", {}).items()}
+    label_to_action_id = {int(k): int(v) for k, v in label_map.get("label_to_action_id", {}).items()}
+    if not action_id_to_label or not label_to_action_id:
+        raise RuntimeError(f"Saved label map is empty or invalid: {label_map_path}")
+
+    return train_ds, eval_ds, action_id_to_label, label_to_action_id
+
+
 
 def _build_intermediate_dataset(
     ds: Any,
@@ -753,7 +817,7 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
     token_mapping = load_action_token_mapping(config.dataset.mapping_table_path)
     action_id_mapping = load_action_id_mapping(config.dataset.mapping_table_path)
 
-    if config.dataset.require_step1_artifacts and not action_id_mapping:
+    if config.dataset.require_step1_artifacts and not action_id_mapping and not config.dataset.use_saved_dataset:
         raise RuntimeError("Step1 mapping table is present but has no usable action-id mappings")
 
     runtime_warnings: List[str] = []
@@ -768,46 +832,57 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
     text_backbone = _load_text_backbone(config, quantization_config)
     text_backbone = _apply_lora_if_enabled(text_backbone, config)
 
-    raw_train_ds, raw_eval_ds = _prepare_raw_splits(config)
-    train_intermediate = _build_intermediate_dataset(
-        ds=raw_train_ds,
-        split_name="train",
-        text_fields=config.dataset.text_field_candidates,
-        action_fields=config.dataset.action_field_candidates,
-        vision_fields=config.dataset.vision_field_candidates,
-        vision_dim=config.dataset.vision_feature_dim,
-        token_mapping=token_mapping,
-        action_id_mapping=action_id_mapping,
-        strict_action_id_mapping=config.dataset.strict_action_id_mapping,
-    )
-    eval_intermediate = _build_intermediate_dataset(
-        ds=raw_eval_ds,
-        split_name="eval",
-        text_fields=config.dataset.text_field_candidates,
-        action_fields=config.dataset.action_field_candidates,
-        vision_fields=config.dataset.vision_field_candidates,
-        vision_dim=config.dataset.vision_feature_dim,
-        token_mapping=token_mapping,
-        action_id_mapping=action_id_mapping,
-        strict_action_id_mapping=config.dataset.strict_action_id_mapping,
-    )
+    if config.dataset.use_saved_dataset:
+        train_ds, eval_ds, action_id_to_label, label_to_action_id = _load_saved_datasets(config)
+    else:
+        raw_train_ds, raw_eval_ds = _prepare_raw_splits(config)
+        train_intermediate = _build_intermediate_dataset(
+            ds=raw_train_ds,
+            split_name="train",
+            text_fields=config.dataset.text_field_candidates,
+            action_fields=config.dataset.action_field_candidates,
+            vision_fields=config.dataset.vision_field_candidates,
+            vision_dim=config.dataset.vision_feature_dim,
+            token_mapping=token_mapping,
+            action_id_mapping=action_id_mapping,
+            strict_action_id_mapping=config.dataset.strict_action_id_mapping,
+        )
+        eval_intermediate = _build_intermediate_dataset(
+            ds=raw_eval_ds,
+            split_name="eval",
+            text_fields=config.dataset.text_field_candidates,
+            action_fields=config.dataset.action_field_candidates,
+            vision_fields=config.dataset.vision_field_candidates,
+            vision_dim=config.dataset.vision_feature_dim,
+            token_mapping=token_mapping,
+            action_id_mapping=action_id_mapping,
+            strict_action_id_mapping=config.dataset.strict_action_id_mapping,
+        )
 
-    action_id_to_label, label_to_action_id = _build_label_maps(train_intermediate)
+        action_id_to_label, label_to_action_id = _build_label_maps(train_intermediate)
 
-    train_ds = _finalize_dataset(
-        ds=train_intermediate,
-        tokenizer=tokenizer,
-        max_length=config.dataset.max_length,
-        action_id_to_label=action_id_to_label,
-        split_name="train",
-    )
-    eval_ds = _finalize_dataset(
-        ds=eval_intermediate,
-        tokenizer=tokenizer,
-        max_length=config.dataset.max_length,
-        action_id_to_label=action_id_to_label,
-        split_name="eval",
-    )
+        train_ds = _finalize_dataset(
+            ds=train_intermediate,
+            tokenizer=tokenizer,
+            max_length=config.dataset.max_length,
+            action_id_to_label=action_id_to_label,
+            split_name="train",
+        )
+        eval_ds = _finalize_dataset(
+            ds=eval_intermediate,
+            tokenizer=tokenizer,
+            max_length=config.dataset.max_length,
+            action_id_to_label=action_id_to_label,
+            split_name="eval",
+        )
+
+        _save_dataset_splits(
+            config=config,
+            train_ds=train_ds,
+            eval_ds=eval_ds,
+            action_id_to_label=action_id_to_label,
+            label_to_action_id=label_to_action_id,
+        )
 
     model = QwenVisionActionModel(
         text_backbone=text_backbone,
@@ -941,6 +1016,9 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
             "train_size": len(train_ds),
             "eval_size": len(eval_ds),
             "num_action_classes": len(action_id_to_label),
+            "save_dataset": config.dataset.save_dataset,
+            "use_saved_dataset": config.dataset.use_saved_dataset,
+            "saved_dataset_dir": str(_resolve_saved_dataset_dir(config)),
         },
         "model": {
             "base_model_id": config.model.base_model_id,

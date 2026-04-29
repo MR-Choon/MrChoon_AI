@@ -127,6 +127,9 @@ class Step2TrainDatasetConfig:
     enforce_distinct_eval_split: bool = True
     require_step1_artifacts: bool = True
     strict_action_id_mapping: bool = True
+    save_dataset: bool = False
+    use_saved_dataset: bool = False
+    saved_dataset_dir: str = ""
 
 
 @dataclass

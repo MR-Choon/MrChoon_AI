@@ -1,5 +1,5 @@
 {
-  "run_name": "step2_full_train_qwen35_qlora",
+  "run_name": "step2_full_train_qwen35_qlora_reuse",
   "seed": 42,
   "dry_run": true,
   "dataset": {
@@ -18,8 +18,8 @@
     "enforce_distinct_eval_split": true,
     "require_step1_artifacts": true,
     "strict_action_id_mapping": true,
-    "save_dataset": true,
-    "use_saved_dataset": false,
+    "save_dataset": false,
+    "use_saved_dataset": true,
     "saved_dataset_dir": "result/step2/full-train/dataset"
   },
   "model": {
