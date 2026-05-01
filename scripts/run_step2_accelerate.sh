@@ -8,7 +8,7 @@ CONFIG=${1:-configs/step2.full-train.hf.json}
 
 echo "Using config: ${CONFIG}"
 
-accelerate launch \
+python -m accelerate launch \
   --config_file configs/accelerate/l40s_config.yaml \
   --deepspeed_config_file configs/deepspeed/offload_z3.json \
   scripts/train_step2_full.py --config "${CONFIG}"
