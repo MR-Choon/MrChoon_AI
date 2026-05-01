@@ -10,13 +10,13 @@ echo "Using config: ${CONFIG}"
 
 # Ensure tokenizer and required dependencies are installed
 echo "Installing required dependencies..."
-python -m pip install --upgrade -q sentencepiece tiktoken accelerate 2>&1 | grep -v "already satisfied" || true
+python -m pip install --upgrade -q sentencepiece tiktoken tokenizers accelerate 2>&1 | grep -v "already satisfied" || true
 
 # Verify critical packages
 echo "Verifying dependencies..."
-python -c "import sentencepiece; import tiktoken; import accelerate" || {
+python -c "import sentencepiece; import tiktoken; import tokenizers; import accelerate" || {
   echo "ERROR: Failed to import required packages. Attempting reinstall..."
-  python -m pip install --force-reinstall sentencepiece tiktoken accelerate
+  python -m pip install --force-reinstall sentencepiece tiktoken tokenizers accelerate
 }
 
 echo "Starting training..."

@@ -444,19 +444,46 @@ def _build_quantization_config(config: Step2TrainConfig) -> Optional[Any]:  # pr
 def _load_tokenizer(config: Step2TrainConfig) -> Any:  # pragma: no cover
     from transformers import AutoTokenizer  # type: ignore
     tok_id = config.model.tokenizer_id
+    
     # support 'repo:subfolder' format
     if isinstance(tok_id, str) and ":" in tok_id and not tok_id.startswith("http"):
         repo, subfolder = tok_id.split(":", 1)
-        tokenizer = AutoTokenizer.from_pretrained(
-            repo,
-            subfolder=subfolder,
-            trust_remote_code=config.model.trust_remote_code,
-        )
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                repo,
+                subfolder=subfolder,
+                trust_remote_code=config.model.trust_remote_code,
+            )
+        except ValueError as e:
+            if "sentencepiece or tiktoken" in str(e):
+                # Fallback: try loading without fast tokenizer
+                print(f"[WARNING] Fast tokenizer loading failed, attempting slow tokenizer: {e}", flush=True)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    repo,
+                    subfolder=subfolder,
+                    trust_remote_code=config.model.trust_remote_code,
+                    use_fast=False,
+                )
+            else:
+                raise
     else:
-        tokenizer = AutoTokenizer.from_pretrained(
-            tok_id,
-            trust_remote_code=config.model.trust_remote_code,
-        )
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                tok_id,
+                trust_remote_code=config.model.trust_remote_code,
+            )
+        except ValueError as e:
+            if "sentencepiece or tiktoken" in str(e):
+                # Fallback: try loading without fast tokenizer
+                print(f"[WARNING] Fast tokenizer loading failed, attempting slow tokenizer: {e}", flush=True)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    tok_id,
+                    trust_remote_code=config.model.trust_remote_code,
+                    use_fast=False,
+                )
+            else:
+                raise
+    
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
