@@ -465,6 +465,18 @@ def _load_tokenizer(config: Step2TrainConfig) -> Any:  # pragma: no cover
         import subprocess
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "sentencepiece"])
     
+    # If running a dry run, allow using a small dry-run tokenizer to avoid HF/tokenizer issues
+    dry_id = getattr(config.model, "dry_run_model_id", None)
+    if getattr(config, "dry_run", False) and dry_id:
+        try:
+            print(f"[INFO] Dry-run: loading tokenizer from dry_run_model_id {dry_id}", file=sys.stderr, flush=True)
+            tokenizer = AutoTokenizer.from_pretrained(dry_id, use_fast=False, trust_remote_code=True)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            return tokenizer
+        except Exception as e:
+            print(f"[WARNING] Failed to load dry-run tokenizer {dry_id}: {e}", file=sys.stderr, flush=True)
+
     tok_id = config.model.tokenizer_id
     
     # support 'repo:subfolder' format
