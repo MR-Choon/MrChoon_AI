@@ -375,12 +375,23 @@ def _validate_step1_artifacts(config: Step2TrainConfig) -> None:
         return
     tokenizer_path = Path(tok_id)
     if not tokenizer_path.exists():
-        raise RuntimeError(
-            "Step1 tokenizer artifact is required. "
-            "Set model.tokenizer_id to a local tokenizer directory produced by Step1, "
-            "or to an HF repo with subfolder using the format 'repo:subfolder'. "
-            f"Current: {config.model.tokenizer_id}"
-        )
+        # If the local path doesn't exist, allow trying to load from the Hub
+        try:
+            from transformers import AutoTokenizer  # type: ignore
+
+            AutoTokenizer.from_pretrained(
+                tok_id,
+                trust_remote_code=config.model.trust_remote_code,
+                use_fast=False,
+            )
+            return
+        except Exception:
+            raise RuntimeError(
+                "Step1 tokenizer artifact is required. "
+                "Set model.tokenizer_id to a local tokenizer directory produced by Step1, "
+                "or to an HF repo with subfolder using the format 'repo:subfolder'. "
+                f"Current: {config.model.tokenizer_id}"
+            )
 
 
 def _resolve_quantization_config_for_runtime(config: Step2TrainConfig) -> Tuple[Optional[Any], bool, List[str]]:  # pragma: no cover
