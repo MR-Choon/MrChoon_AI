@@ -10,7 +10,7 @@ echo "Using config: ${CONFIG}"
 
 # Install ALL critical dependencies explicitly
 echo "Installing all dependencies..."
-python -m pip install --upgrade -q pip setuptools<82 wheel
+python -m pip install --upgrade -q pip "setuptools<82" wheel
 python -m pip install -q --no-cache-dir sentencepiece
 python -m pip install -q --no-cache-dir tiktoken
 python -m pip install -q "tokenizers>=0.22.0,<=0.23.0"
