@@ -544,7 +544,6 @@ def _load_text_backbone(config: Step2TrainConfig, quantization_config: Optional[
 def _apply_lora_if_enabled(text_backbone: Any, config: Step2TrainConfig) -> Any:  # pragma: no cover
     if not config.lora.enabled:
         return text_backbone
-
     from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training  # type: ignore
 
     if config.model.use_4bit:
@@ -558,7 +557,39 @@ def _apply_lora_if_enabled(text_backbone: Any, config: Step2TrainConfig) -> Any:
         target_modules=config.lora.target_modules,
         bias=config.lora.bias,
     )
-    return get_peft_model(text_backbone, lora_config)
+
+    try:
+        return get_peft_model(text_backbone, lora_config)
+    except ValueError as exc:
+        print(f"[WARNING] LoRA injection failed with target modules {config.lora.target_modules}: {exc}", flush=True)
+        # Attempt to auto-detect compatible target module names from the base model
+        try:
+            available = [name for name, _ in text_backbone.named_modules()]
+        except Exception:
+            available = []
+
+        fallback_targets: List[str] = []
+        if any("c_attn" in n for n in available):
+            fallback_targets = ["c_attn", "c_proj"]
+        elif any("q_proj" in n for n in available) or any("v_proj" in n for n in available):
+            # original targets likely valid; re-raise
+            raise
+        elif any("attn" in n for n in available):
+            # pick a small set of common attention-related module name fragments
+            fragments = {part for n in available for part in n.split(".") if "attn" in part or "proj" in part}
+            fallback_targets = list(fragments)[:4]
+
+        if not fallback_targets:
+            print("[WARNING] Could not auto-detect LoRA target modules; proceeding without LoRA.", flush=True)
+            return text_backbone
+
+        print(f"[INFO] Retrying LoRA with fallback target modules: {fallback_targets}", flush=True)
+        lora_config.target_modules = fallback_targets
+        try:
+            return get_peft_model(text_backbone, lora_config)
+        except Exception:
+            print("[ERROR] LoRA injection still failed with fallback targets; proceeding without LoRA.", flush=True)
+            return text_backbone
 
 
 class QwenVisionActionModel(_BaseTorchModule):  # pragma: no cover
