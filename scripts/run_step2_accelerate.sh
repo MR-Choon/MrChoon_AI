@@ -8,12 +8,18 @@ CONFIG=${1:-configs/step2.full-train.hf.json}
 
 echo "Using config: ${CONFIG}"
 
-# Ensure tokenizer dependencies are installed
-echo "Installing tokenizer dependencies..."
-pip install -q sentencepiece tiktoken
+# Ensure tokenizer and required dependencies are installed
+echo "Installing required dependencies..."
+python -m pip install --upgrade -q sentencepiece tiktoken accelerate 2>&1 | grep -v "already satisfied" || true
 
-# Check if accelerate is installed, if not install it
-python -c "import accelerate" 2>/dev/null || pip install accelerate
+# Verify critical packages
+echo "Verifying dependencies..."
+python -c "import sentencepiece; import tiktoken; import accelerate" || {
+  echo "ERROR: Failed to import required packages. Attempting reinstall..."
+  python -m pip install --force-reinstall sentencepiece tiktoken accelerate
+}
+
+echo "Starting training..."
 
 python -m accelerate.commands.launch \
   --config_file configs/accelerate/l40s_config.yaml \

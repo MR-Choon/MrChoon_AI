@@ -21,6 +21,7 @@ hf = [
   "transformers>=4.50.0",
   "peft>=0.14.0",
   "sentencepiece>=0.2.0",
+  "tiktoken>=0.5.0",
   "torch>=2.4.0"
 ]
 
