@@ -1,19 +1,19 @@
 {
   "run_name": "step2_full_train_qwen35_qlora",
   "seed": 42,
-  "dry_run": true,
+  "dry_run": false,
   "dataset": {
     "dataset_id": "CraftJarvis/minecraft-vla-sft",
     "train_split": "train",
     "eval_split": "train",
-    "max_train_samples": 256,
-    "max_eval_samples": 64,
+    "max_train_samples": 0,
+    "max_eval_samples": 0,
     "text_field_candidates": ["instruction", "prompt", "text", "obs", "observation"],
     "action_field_candidates": ["action_token_ids", "actions.action_ids", "action_ids", "actions"],
     "vision_field_candidates": ["vision_features", "image_features", "obs.vision", "observation.vision", "pixels", "image"],
     "vision_feature_dim": 48,
     "max_length": 512,
-    "mapping_table_path": "artifacts/step1/mock/token_id_mapping.csv",
+    "mapping_table_path": "https://huggingface.co/Infinity08/choonsik-step1/resolve/main/token_id_mapping.csv",
     "eval_holdout_ratio": 0.1,
     "enforce_distinct_eval_split": true,
     "require_step1_artifacts": true,
@@ -23,8 +23,8 @@
     "saved_dataset_dir": "result/step2/full-train/dataset"
   },
   "model": {
-    "base_model_id": "Qwen/Qwen3.5-9B-Instruct",
-    "tokenizer_id": "artifacts/step1/mock/target_tokenizer_after",
+    "base_model_id": "Qwen/Qwen3.5-9B",
+    "tokenizer_id": "Infinity08/choonsik-step1:target_tokenizer_after",
     "trust_remote_code": true,
     "use_4bit": true,
     "bnb_4bit_quant_type": "nf4",
@@ -57,8 +57,13 @@
     "fp16": false,
     "bf16": true,
     "gradient_checkpointing": true,
-    "max_steps": 20,
+    "max_steps": -1,
     "report_to": ["tensorboard"],
-    "logging_dir": "result/step2/full-train/tb"
+    "logging_dir": "result/step2/full-train/tb",
+    "dataloader_num_workers": 8,
+    "use_accelerate_offload": true,
+    "push_to_hub": true,
+    "hub_model_id": "choonsik-step2",
+    "hub_private_repo": true
   }
 }

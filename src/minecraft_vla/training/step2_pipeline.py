@@ -77,7 +77,7 @@ def run_step2_pipeline(config: Step2Config) -> Dict[str, Any]:
         split=config.dataset.split,
         max_samples=config.dataset.max_samples,
     )
-    action_ids = extract_action_token_ids(samples)
+    action_ids, sample_count = extract_action_token_ids(samples)
 
     model, model_meta = build_vla_model(config)
     adapted_model, qlora_info = apply_qlora(model, config.qlora, config.backend)
@@ -96,7 +96,7 @@ def run_step2_pipeline(config: Step2Config) -> Dict[str, Any]:
         "run_name": config.run_name,
         "backend": config.backend,
         "dataset_id": config.dataset.dataset_id,
-        "sample_count": len(samples),
+        "sample_count": sample_count,
         "action_token_count": len(action_ids),
         "model": model_meta,
         "qlora": asdict(qlora_info),

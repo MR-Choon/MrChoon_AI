@@ -1,0 +1,12 @@
+compute_environment: LOCAL_MACHINE
+distributed_type: NO
+num_machines: 1
+num_processes: 1
+machine_rank: 0
+main_process_ip: null
+main_process_port: null
+mixed_precision: bf16
+use_cpu: false
+fp16: false
+bf16: true
+deepspeed_config: null

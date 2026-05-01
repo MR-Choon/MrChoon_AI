@@ -4,11 +4,11 @@
   "seed": 42,
   "output_dir": "artifacts/step1/hf",
   "source_tokenizer_id": "Qwen/Qwen2-VL-7B-Instruct",
-  "target_tokenizer_id": "Qwen/Qwen3.5-9B-Instruct",
+  "target_tokenizer_id": "Qwen/Qwen3.5-9B",
   "dataset": {
     "dataset_id": "CraftJarvis/minecraft-vla-sft",
     "split": "train",
-    "max_samples": 50
+    "max_samples": 0
   },
   "add_missing_tokens": true
 }

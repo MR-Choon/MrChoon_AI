@@ -234,9 +234,10 @@ def test_full_train_pipeline_integration(monkeypatch: Any, tmp_path: Path) -> No
     assert report["dataset"]["num_action_classes"] == 2
     assert "runtime_warnings" in report
     assert report["logging"]["report_to"] == ["tensorboard"]
-    assert report["logging"]["logging_dir"].endswith("/tb")
+    assert Path(report["logging"]["logging_dir"]).name == "tb"
     assert (out_dir / "step2_full_train_report.json").exists()
     assert (out_dir / "step2_full_train_config_used.json").exists()
     assert (out_dir / "model_analysis.json").exists()
+    assert (out_dir / "model_bundle" / "pytorch_model.bin").exists()
     assert (out_dir / "action_label_map.json").exists()
     assert (out_dir / "vla_head_state.pt").exists()

@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import asdict, dataclass
+import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -20,6 +22,9 @@ class MappingRow:
     match_type: str
     confidence: float
     notes: str
+
+
+ACTION_TOKEN_PATTERN = re.compile(r"<\|reserved_special_token_\d+\|>")
 
 
 class MockTokenizer:
@@ -151,18 +156,67 @@ def _iter_action_candidate_lists(obj: Any, path: Tuple[str, ...] = ()) -> Iterab
 
 
 
-def _collect_source_ids(samples: Sequence[Dict[str, Any]]) -> Tuple[List[int], Dict[str, int]]:
-    ids_counter: Dict[int, int] = {}
-    path_counter: Dict[str, int] = {}
+def _extract_action_tokens_from_conversations(sample: Dict[str, Any]) -> List[str]:
+    tokens: List[str] = []
+    conv = sample.get("conversations", [])
+    if not isinstance(conv, list):
+        return tokens
 
-    for sample in samples:
+    for msg in conv:
+        if not isinstance(msg, dict):
+            continue
+        if str(msg.get("role", "")).lower() != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") != "text":
+                continue
+            text = part.get("text") or ""
+            if text:
+                tokens.extend(ACTION_TOKEN_PATTERN.findall(text))
+    return tokens
+
+
+def _collect_source_ids(
+    samples: Iterable[Dict[str, Any]],
+    source_tokenizer: Any,
+) -> Tuple[List[int], Dict[str, int], List[str], int]:
+    ids_counter: Dict[int, int] = {}
+    token_counter: Dict[str, int] = {}
+    path_counter: Dict[str, int] = {}
+    unk_id = getattr(source_tokenizer, "unk_token_id", None)
+
+    progress_interval = 10000  # Print progress every 10k samples
+    sample_count = 0
+
+    for idx, sample in enumerate(samples):
+        sample_count += 1
+        if (idx + 1) % progress_interval == 0:
+            print(f"[PROGRESS] Collecting action tokens: {idx + 1} samples processed", file=sys.stderr, flush=True)
+        
         for path, values in _iter_action_candidate_lists(sample):
             key = ".".join(path)
             path_counter[key] = path_counter.get(key, 0) + 1
             for token_id in values:
                 ids_counter[token_id] = ids_counter.get(token_id, 0) + 1
 
-    return sorted(ids_counter), path_counter
+        action_tokens = _extract_action_tokens_from_conversations(sample)
+        if action_tokens:
+            key = "conversations.assistant.text"
+            path_counter[key] = path_counter.get(key, 0) + 1
+            for token_str in action_tokens:
+                token_id = source_tokenizer.convert_tokens_to_ids(token_str)
+                if isinstance(token_id, int) and (unk_id is None or token_id != unk_id):
+                    ids_counter[token_id] = ids_counter.get(token_id, 0) + 1
+                else:
+                    token_counter[token_str] = token_counter.get(token_str, 0) + 1
+
+    print(f"[PROGRESS] Collection complete: {sample_count} total samples", file=sys.stderr, flush=True)
+    return sorted(ids_counter), path_counter, sorted(token_counter), sample_count
 
 
 
@@ -170,6 +224,7 @@ def _build_mapping_rows(
     source_tokenizer: Any,
     target_tokenizer: Any,
     source_ids: Sequence[int],
+    source_token_strs: Sequence[str],
     add_missing_tokens: bool,
 ) -> Tuple[List[MappingRow], int, int]:
     target_vocab = target_tokenizer.get_vocab()
@@ -177,10 +232,9 @@ def _build_mapping_rows(
 
     rows: List[MappingRow] = []
     missing_tokens: List[str] = []
+    seen_tokens: set[str] = set()
 
-    for old_id in source_ids:
-        token_str = str(source_tokenizer.convert_ids_to_tokens(old_id))
-
+    def append_mapping(old_id: int, token_str: str) -> None:
         if token_str in target_vocab:
             rows.append(
                 MappingRow(
@@ -192,7 +246,7 @@ def _build_mapping_rows(
                     notes="",
                 )
             )
-            continue
+            return
 
         normalized = _normalize_token(token_str)
         if normalized in normalized_target_vocab:
@@ -206,7 +260,7 @@ def _build_mapping_rows(
                     notes=f"normalized={normalized}",
                 )
             )
-            continue
+            return
 
         missing_tokens.append(token_str)
         rows.append(
@@ -219,6 +273,17 @@ def _build_mapping_rows(
                 notes="token not found in target vocab",
             )
         )
+
+    for old_id in source_ids:
+        token_str = str(source_tokenizer.convert_ids_to_tokens(old_id))
+        seen_tokens.add(token_str)
+        append_mapping(old_id, token_str)
+
+    for idx, token_str in enumerate(source_token_strs):
+        if token_str in seen_tokens:
+            continue
+        seen_tokens.add(token_str)
+        append_mapping(-1 - idx, token_str)
 
     added_count = 0
     if add_missing_tokens:
@@ -366,15 +431,20 @@ def _run_hf_dryrun(vocab_size: int, output_dir: Path, mapped_ids: Sequence[int])
 def run_step1_pipeline(config: Step1Config) -> Dict[str, Any]:
     set_seed(config.seed)
     output_dir = ensure_dir(config.output_dir)
+    print(f"[STEP1] Starting pipeline. Backend: {config.backend}, Output: {output_dir}", file=sys.stderr, flush=True)
 
     if config.backend == "mock":
+        print("[STEP1] Loading mock tokenizers...", file=sys.stderr, flush=True)
         source_tokenizer, target_tokenizer = _load_mock_tokenizers()
     else:
+        print(f"[STEP1] Loading HF tokenizers (source: {config.source_tokenizer_id}, target: {config.target_tokenizer_id})...", file=sys.stderr, flush=True)
         source_tokenizer, target_tokenizer = _load_hf_tokenizers(
             config.source_tokenizer_id,
             config.target_tokenizer_id,
         )
+        print(f"[STEP1] Tokenizers loaded. Target vocab size: {len(target_tokenizer)}", file=sys.stderr, flush=True)
 
+    print(f"[STEP1] Loading dataset: {config.dataset.dataset_id} (split: {config.dataset.split}, max_samples: {config.dataset.max_samples})...", file=sys.stderr, flush=True)
     samples = load_samples(
         backend=config.backend,
         dataset_id=config.dataset.dataset_id,
@@ -382,13 +452,19 @@ def run_step1_pipeline(config: Step1Config) -> Dict[str, Any]:
         max_samples=config.dataset.max_samples,
     )
 
-    source_ids, action_paths = _collect_source_ids(samples)
+    print("[STEP1] Collecting action tokens from samples...", file=sys.stderr, flush=True)
+    source_ids, action_paths, source_token_strs, sample_count = _collect_source_ids(samples, source_tokenizer)
+    print(f"[STEP1] Collected {len(source_ids)} unique action IDs and {len(source_token_strs)} unique token strings from {sample_count} samples", file=sys.stderr, flush=True)
+    
+    print("[STEP1] Building token ID mappings...", file=sys.stderr, flush=True)
     rows, added_count, unmapped_count = _build_mapping_rows(
         source_tokenizer=source_tokenizer,
         target_tokenizer=target_tokenizer,
         source_ids=source_ids,
+        source_token_strs=source_token_strs,
         add_missing_tokens=config.add_missing_tokens,
     )
+    print(f"[STEP1] Mapping complete: {len(rows)} rows, {added_count} tokens added, {unmapped_count} unmapped", file=sys.stderr, flush=True)
 
     mapped_ids = [row.mapped_new_id for row in rows]
     summary = {
@@ -398,9 +474,10 @@ def run_step1_pipeline(config: Step1Config) -> Dict[str, Any]:
         "target_tokenizer_id": config.target_tokenizer_id,
         "dataset_id": config.dataset.dataset_id,
         "dataset_split": config.dataset.split,
-        "sample_count": len(samples),
+        "sample_count": sample_count,
         "action_paths": action_paths,
         "source_action_token_id_count": len(source_ids),
+        "source_action_token_str_count": len(source_token_strs),
         "mapping_count": len(rows),
         "added_token_count": int(added_count),
         "unmapped_count": int(unmapped_count),
@@ -408,17 +485,24 @@ def run_step1_pipeline(config: Step1Config) -> Dict[str, Any]:
         "target_vocab_size_after": len(target_tokenizer),
     }
 
+    print("[STEP1] Saving mapping artifacts...", file=sys.stderr, flush=True)
     _save_mapping_artifacts(output_dir, rows, summary)
     target_tokenizer.save_pretrained(output_dir / "target_tokenizer_after")
+    print("[STEP1] Artifacts saved successfully", file=sys.stderr, flush=True)
 
+    print("[STEP1] Running dryrun test...", file=sys.stderr, flush=True)
     if config.backend == "mock":
         dryrun = _run_mock_dryrun(len(target_tokenizer), output_dir, mapped_ids)
     else:
         dryrun = _run_hf_dryrun(len(target_tokenizer), output_dir, mapped_ids)
+    print("[STEP1] Dryrun complete", file=sys.stderr, flush=True)
 
     write_json(output_dir / "dryrun_report.json", dryrun)
     write_json(output_dir / "step1_config_used.json", json.loads(json.dumps(asdict(config))))
 
+    print(f"[STEP1] Completed successfully!", file=sys.stderr, flush=True)
+    print(f"[STEP1] Summary: {sample_count} samples, {len(rows)} mappings, {added_count} tokens added", file=sys.stderr, flush=True)
+    
     return {
         "summary": summary,
         "dryrun": dryrun,

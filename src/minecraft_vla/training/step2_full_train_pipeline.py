@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -10,6 +11,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from minecraft_vla.config import Step2TrainConfig, load_step2_train_config
 from minecraft_vla.utils.io import ensure_dir, write_json
 from minecraft_vla.utils.seed import set_seed
+
+ACTION_TOKEN_PATTERN = re.compile(r"<\|reserved_special_token_\d+\|>")
+
 
 try:  # pragma: no cover - import fallback for environments without torch
     import torch.nn as _torch_nn  # type: ignore
@@ -75,45 +79,141 @@ def _pick_action_values(row: Dict[str, Any], candidates: Sequence[str]) -> List[
         value = _safe_get(row, key)
         if isinstance(value, list):
             return value
+
+    tokens: List[str] = []
+    conv = row.get("conversations", [])
+    if isinstance(conv, list):
+        for msg in conv:
+            if not isinstance(msg, dict):
+                continue
+            if str(msg.get("role", "")).lower() != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") != "text":
+                    continue
+                text = part.get("text") or ""
+                if text:
+                    tokens.extend(ACTION_TOKEN_PATTERN.findall(text))
+    if tokens:
+        return tokens
     return []
 
 
 
 def load_action_token_mapping(mapping_table_path: str) -> Dict[int, str]:
-    path = Path(mapping_table_path)
-    if not mapping_table_path or not path.exists():
+    if not mapping_table_path:
         return {}
 
     mapping: Dict[int, str] = {}
-    with path.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
+
+    def _iter_rows(text: str):
+        reader = csv.DictReader(text.splitlines())
         for row in reader:
-            try:
-                old_id = int(row.get("old_id", ""))
-            except ValueError:
-                continue
-            token_str = str(row.get("token_str", ""))
-            if token_str:
-                mapping[old_id] = token_str
+            yield row
+
+    if isinstance(mapping_table_path, str) and mapping_table_path.startswith("http"):
+        try:
+            import requests
+
+            resp = requests.get(mapping_table_path, timeout=30)
+            resp.raise_for_status()
+            text = resp.text
+        except Exception:
+            return {}
+        rows_iter = _iter_rows(text)
+    else:
+        path = Path(mapping_table_path)
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as f:
+            rows_iter = csv.DictReader(f)
+
+    for row in rows_iter:
+        try:
+            old_id = int(row.get("old_id", ""))
+        except (ValueError, TypeError):
+            continue
+        if old_id < 0:
+            continue
+        token_str = str(row.get("token_str", ""))
+        if token_str:
+            mapping[old_id] = token_str
     return mapping
 
 
 
 def load_action_id_mapping(mapping_table_path: str) -> Dict[int, int]:
-    path = Path(mapping_table_path)
-    if not mapping_table_path or not path.exists():
+    if not mapping_table_path:
         return {}
 
     mapping: Dict[int, int] = {}
-    with path.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            try:
-                old_id = int(row.get("old_id", ""))
-                mapped_new_id = int(row.get("mapped_new_id", ""))
-            except ValueError:
-                continue
-            mapping[old_id] = mapped_new_id
+
+    if isinstance(mapping_table_path, str) and mapping_table_path.startswith("http"):
+        try:
+            import requests
+
+            resp = requests.get(mapping_table_path, timeout=30)
+            resp.raise_for_status()
+            text = resp.text
+            reader = csv.DictReader(text.splitlines())
+        except Exception:
+            return {}
+    else:
+        path = Path(mapping_table_path)
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+
+    for row in reader:
+        try:
+            old_id = int(row.get("old_id", ""))
+            mapped_new_id = int(row.get("mapped_new_id", ""))
+        except (ValueError, TypeError):
+            continue
+        if old_id < 0:
+            continue
+        mapping[old_id] = mapped_new_id
+    return mapping
+
+
+def load_token_str_to_new_id(mapping_table_path: str) -> Dict[str, int]:
+    if not mapping_table_path:
+        return {}
+
+    mapping: Dict[str, int] = {}
+
+    if isinstance(mapping_table_path, str) and mapping_table_path.startswith("http"):
+        try:
+            import requests
+
+            resp = requests.get(mapping_table_path, timeout=30)
+            resp.raise_for_status()
+            text = resp.text
+            reader = csv.DictReader(text.splitlines())
+        except Exception:
+            return {}
+    else:
+        path = Path(mapping_table_path)
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+
+    for row in reader:
+        token_str = str(row.get("token_str", "")).strip()
+        if not token_str:
+            continue
+        try:
+            mapped_new_id = int(row.get("mapped_new_id", ""))
+        except (ValueError, TypeError):
+            continue
+        mapping[token_str] = mapped_new_id
     return mapping
 
 
@@ -223,6 +323,7 @@ def _extract_action_label(
     row: Dict[str, Any],
     action_fields: Sequence[str],
     old_to_new_action_id: Dict[int, int],
+    token_str_to_new_id: Dict[str, int],
     strict_action_id_mapping: bool,
 ) -> Optional[int]:
     action_values = _pick_action_values(row, action_fields)
@@ -240,6 +341,10 @@ def _extract_action_label(
                     return None
                 return int(old_to_new_action_id[parsed])
             return int(old_to_new_action_id.get(parsed, parsed))
+        if isinstance(value, str):
+            token_str = value.strip()
+            if token_str in token_str_to_new_id:
+                return int(token_str_to_new_id[token_str])
     return None
 
 
@@ -249,18 +354,31 @@ def _validate_step1_artifacts(config: Step2TrainConfig) -> None:
         return
 
     if not config.dataset.use_saved_dataset:
-        mapping_path = Path(config.dataset.mapping_table_path)
-        if not mapping_path.exists():
-            raise RuntimeError(
-                "Step1 mapping table is required but missing. "
-                f"Expected: {mapping_path}"
-            )
+        mapping_path = config.dataset.mapping_table_path
+        # allow remote mapping URLs (http/https) when running remotely
+        if not (isinstance(mapping_path, str) and mapping_path.startswith("http")):
+            mp = Path(mapping_path)
+            if not mp.exists():
+                raise RuntimeError(
+                    "Step1 mapping table is required but missing. "
+                    f"Expected: {mp}"
+                )
 
-    tokenizer_path = Path(config.model.tokenizer_id)
+    # Allow tokenizer to be a remote HF repo with optional subfolder indicated by 'repo:subfolder'
+    tok_id = config.model.tokenizer_id
+    if isinstance(tok_id, str) and tok_id.startswith("http"):
+        # remote URL — assume available
+        return
+    if isinstance(tok_id, str) and ":" in tok_id:
+        repo, sub = tok_id.split(":", 1)
+        # do not require local existence for repo-based tokenizer
+        return
+    tokenizer_path = Path(tok_id)
     if not tokenizer_path.exists():
         raise RuntimeError(
             "Step1 tokenizer artifact is required. "
-            "Set model.tokenizer_id to a local tokenizer directory produced by Step1. "
+            "Set model.tokenizer_id to a local tokenizer directory produced by Step1, "
+            "or to an HF repo with subfolder using the format 'repo:subfolder'. "
             f"Current: {config.model.tokenizer_id}"
         )
 
@@ -325,11 +443,20 @@ def _build_quantization_config(config: Step2TrainConfig) -> Optional[Any]:  # pr
 
 def _load_tokenizer(config: Step2TrainConfig) -> Any:  # pragma: no cover
     from transformers import AutoTokenizer  # type: ignore
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.model.tokenizer_id,
-        trust_remote_code=config.model.trust_remote_code,
-    )
+    tok_id = config.model.tokenizer_id
+    # support 'repo:subfolder' format
+    if isinstance(tok_id, str) and ":" in tok_id and not tok_id.startswith("http"):
+        repo, subfolder = tok_id.split(":", 1)
+        tokenizer = AutoTokenizer.from_pretrained(
+            repo,
+            subfolder=subfolder,
+            trust_remote_code=config.model.trust_remote_code,
+        )
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tok_id,
+            trust_remote_code=config.model.trust_remote_code,
+        )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
@@ -451,6 +578,21 @@ class QwenVisionActionModel(_BaseTorchModule):  # pragma: no cover
             output["loss"] = F.cross_entropy(logits, labels.long())
         return output
 
+    def save_pretrained(self, output_dir: str | Path) -> None:
+        import torch  # type: ignore
+
+        target_dir = ensure_dir(output_dir)
+        torch.save(self.state_dict(), Path(target_dir) / "pytorch_model.bin")
+        write_json(
+            Path(target_dir) / "model_config.json",
+            {
+                "vision_feature_dim": self.vision_feature_dim,
+                "num_actions": self.num_actions,
+                "text_backbone_class": self.text_backbone.__class__.__name__,
+                "model_class": self.__class__.__name__,
+            },
+        )
+
 
 class VLABatchCollator:  # pragma: no cover
     def __init__(self, tokenizer: Any) -> None:
@@ -480,12 +622,14 @@ def _row_to_intermediate(
     vision_dim: int,
     token_mapping: Dict[int, str],
     action_id_mapping: Dict[int, int],
+    token_str_to_new_id: Dict[str, int],
     strict_action_id_mapping: bool,
 ) -> Dict[str, Any]:
     action_id = _extract_action_label(
         row=row,
         action_fields=action_fields,
         old_to_new_action_id=action_id_mapping,
+        token_str_to_new_id=token_str_to_new_id,
         strict_action_id_mapping=strict_action_id_mapping,
     )
 
@@ -644,6 +788,7 @@ def _build_intermediate_dataset(
     vision_dim: int,
     token_mapping: Dict[int, str],
     action_id_mapping: Dict[int, int],
+    token_str_to_new_id: Dict[str, int],
     strict_action_id_mapping: bool,
 ) -> Any:  # pragma: no cover
     original_columns = list(ds.column_names)
@@ -657,6 +802,7 @@ def _build_intermediate_dataset(
             vision_dim=vision_dim,
             token_mapping=token_mapping,
             action_id_mapping=action_id_mapping,
+            token_str_to_new_id=token_str_to_new_id,
             strict_action_id_mapping=strict_action_id_mapping,
         ),
         remove_columns=original_columns,
@@ -816,9 +962,15 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
 
     token_mapping = load_action_token_mapping(config.dataset.mapping_table_path)
     action_id_mapping = load_action_id_mapping(config.dataset.mapping_table_path)
+    token_str_to_new_id = load_token_str_to_new_id(config.dataset.mapping_table_path)
 
-    if config.dataset.require_step1_artifacts and not action_id_mapping and not config.dataset.use_saved_dataset:
-        raise RuntimeError("Step1 mapping table is present but has no usable action-id mappings")
+    if (
+        config.dataset.require_step1_artifacts
+        and not action_id_mapping
+        and not token_str_to_new_id
+        and not config.dataset.use_saved_dataset
+    ):
+        raise RuntimeError("Step1 mapping table is present but has no usable action mappings")
 
     runtime_warnings: List[str] = []
 
@@ -845,6 +997,7 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
             vision_dim=config.dataset.vision_feature_dim,
             token_mapping=token_mapping,
             action_id_mapping=action_id_mapping,
+            token_str_to_new_id=token_str_to_new_id,
             strict_action_id_mapping=config.dataset.strict_action_id_mapping,
         )
         eval_intermediate = _build_intermediate_dataset(
@@ -856,6 +1009,7 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
             vision_dim=config.dataset.vision_feature_dim,
             token_mapping=token_mapping,
             action_id_mapping=action_id_mapping,
+            token_str_to_new_id=token_str_to_new_id,
             strict_action_id_mapping=config.dataset.strict_action_id_mapping,
         )
 
@@ -954,6 +1108,9 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
     eval_metrics = trainer.evaluate() if evaluation_strategy == "steps" else {}
     model_stats = collect_model_parameter_stats(model)
 
+    model_bundle_dir = Path(out_dir) / "model_bundle"
+    model.save_pretrained(model_bundle_dir)
+
     tokenizer_dir = Path(out_dir) / "tokenizer"
     tokenizer.save_pretrained(tokenizer_dir)
 
@@ -1041,6 +1198,7 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
         },
         "artifacts": {
             "output_dir": str(out_dir),
+            "model_bundle": str(model_bundle_dir),
             "text_model_artifact": text_model_artifact,
             "vla_head_state": str(vla_head_path),
             "action_label_map": str(action_label_map_path),

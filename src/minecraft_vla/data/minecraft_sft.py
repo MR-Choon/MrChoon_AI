@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
@@ -18,12 +19,14 @@ def _iter_action_candidate_lists(obj: Any, path: Tuple[str, ...] = ()) -> Iterab
             yield from _iter_action_candidate_lists(value, path + (str(idx),))
 
 
-def extract_action_token_ids(samples: Sequence[Dict[str, Any]]) -> List[int]:
+def extract_action_token_ids(samples: Iterable[Dict[str, Any]]) -> tuple[List[int], int]:
     ids: List[int] = []
+    sample_count = 0
     for row in samples:
+        sample_count += 1
         for action_list in _iter_action_candidate_lists(row):
             ids.extend(action_list)
-    return ids
+    return ids, sample_count
 
 
 def _load_mock_samples(max_samples: int) -> List[Dict[str, Any]]:
@@ -47,19 +50,27 @@ def _load_mock_samples(max_samples: int) -> List[Dict[str, Any]]:
     return rows
 
 
-def _load_hf_samples(dataset_id: str, split: str, max_samples: int) -> List[Dict[str, Any]]:
+def _load_hf_samples(dataset_id: str, split: str, max_samples: int) -> Iterable[Dict[str, Any]]:
     from datasets import load_dataset  # type: ignore
 
-    rows: List[Dict[str, Any]] = []
     stream = load_dataset(dataset_id, split=split, streaming=True)
-    for idx, item in enumerate(stream):
-        rows.append(dict(item))
-        if idx + 1 >= max_samples:
+    print(f"[DATASET] Starting to stream {dataset_id}/{split}...", file=sys.stderr, flush=True)
+    
+    progress_interval = 10000  # Print every 10k samples
+    idx = 0
+    for item in stream:
+        yield dict(item)
+        idx += 1
+        if idx % progress_interval == 0:
+            if max_samples > 0:
+                print(f"[DATASET] Streamed {idx}/{max_samples} samples", file=sys.stderr, flush=True)
+            else:
+                print(f"[DATASET] Streamed {idx} samples...", file=sys.stderr, flush=True)
+        if max_samples > 0 and idx >= max_samples:
             break
-    return rows
 
 
-def load_samples(backend: str, dataset_id: str, split: str, max_samples: int) -> List[Dict[str, Any]]:
+def load_samples(backend: str, dataset_id: str, split: str, max_samples: int) -> Iterable[Dict[str, Any]]:
     if backend == "mock":
         return _load_mock_samples(max_samples)
     return _load_hf_samples(dataset_id, split, max_samples)
