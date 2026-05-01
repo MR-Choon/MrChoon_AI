@@ -11,4 +11,4 @@ echo "Using config: ${CONFIG}"
 accelerate launch \
   --config_file configs/accelerate/l40s_config.yaml \
   --deepspeed_config_file configs/deepspeed/offload_z3.json \
-  scripts/run_step2.py --config "${CONFIG}"
+  scripts/train_step2_full.py --config "${CONFIG}"
