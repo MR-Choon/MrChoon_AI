@@ -1081,6 +1081,10 @@ def run_step2_full_train_pipeline(config: Step2TrainConfig) -> Dict[str, Any]:  
         "logging_dir": logging_dir,
         "remove_unused_columns": False,
         "dataloader_pin_memory": False,
+        "disable_tqdm": False,
+        "logging_first_step": True,
+        "log_level": "INFO",
+        "log_level_replica": "INFO",
     }
 
     try:

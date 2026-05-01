@@ -8,7 +8,10 @@ CONFIG=${1:-configs/step2.full-train.hf.json}
 
 echo "Using config: ${CONFIG}"
 
-python -m accelerate launch \
+# Check if accelerate is installed, if not install it
+python -c "import accelerate" 2>/dev/null || pip install accelerate
+
+python -m accelerate.commands.launch \
   --config_file configs/accelerate/l40s_config.yaml \
   --deepspeed_config_file configs/deepspeed/offload_z3.json \
   scripts/train_step2_full.py --config "${CONFIG}"
