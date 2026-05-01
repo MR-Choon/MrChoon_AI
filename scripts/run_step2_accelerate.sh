@@ -8,6 +8,10 @@ CONFIG=${1:-configs/step2.full-train.hf.json}
 
 echo "Using config: ${CONFIG}"
 
+# Ensure tokenizer dependencies are installed
+echo "Installing tokenizer dependencies..."
+pip install -q sentencepiece tiktoken
+
 # Check if accelerate is installed, if not install it
 python -c "import accelerate" 2>/dev/null || pip install accelerate
 
