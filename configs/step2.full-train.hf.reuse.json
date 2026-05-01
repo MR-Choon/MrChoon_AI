@@ -19,7 +19,7 @@
     "require_step1_artifacts": true,
     "strict_action_id_mapping": true,
     "save_dataset": false,
-    "use_saved_dataset": true,
+    "use_saved_dataset": false,
     "saved_dataset_dir": "result/step2/full-train/dataset"
   },
   "model": {
