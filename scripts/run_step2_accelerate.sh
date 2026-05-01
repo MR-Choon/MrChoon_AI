@@ -8,30 +8,20 @@ CONFIG=${1:-configs/step2.full-train.hf.json}
 
 echo "Using config: ${CONFIG}"
 
-# Fix all dependency issues at once
-echo "Resolving all dependencies..."
-python -m pip install --upgrade pip setuptools wheel -q
-python -m pip install -e .[hf] --upgrade -q 2>&1 | tail -20 || true
+# Install ALL critical dependencies explicitly
+echo "Installing all dependencies..."
+python -m pip install --upgrade -q pip setuptools<82 wheel
+python -m pip install -q --no-cache-dir sentencepiece
+python -m pip install -q --no-cache-dir tiktoken
+python -m pip install -q "tokenizers>=0.22.0,<=0.23.0"
+python -m pip install -q accelerate
 
-# Force correct tokenizers version
-python -m pip install "tokenizers>=0.22.0,<=0.23.0" -q
+# Verify installation
+echo "Verifying sentencepiece installation..."
+python -c "import sentencepiece; print(f'sentencepiece version: {sentencepiece.__version__}')"
 
-echo "Verifying dependencies..."
-python -c "
-import sys
-try:
-    import torch
-    import transformers
-    import peft
-    import datasets
-    import accelerate
-    import sentencepiece
-    import tokenizers
-    print('All dependencies OK')
-except ImportError as e:
-    print(f'ERROR: {e}', file=sys.stderr)
-    sys.exit(1)
-"
+echo "Verifying tiktoken installation..."
+python -c "import tiktoken; print('tiktoken OK')"
 
 echo "Starting training..."
 

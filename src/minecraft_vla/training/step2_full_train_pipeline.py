@@ -443,46 +443,46 @@ def _build_quantization_config(config: Step2TrainConfig) -> Optional[Any]:  # pr
 
 def _load_tokenizer(config: Step2TrainConfig) -> Any:  # pragma: no cover
     from transformers import AutoTokenizer  # type: ignore
+    import sys
+    
+    # Ensure tokenizer backends are available
+    try:
+        import sentencepiece  # type: ignore
+        print(f"[INFO] sentencepiece {sentencepiece.__version__} is available", file=sys.stderr, flush=True)
+    except ImportError:
+        print("[WARNING] sentencepiece not found, trying to install...", file=sys.stderr, flush=True)
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "sentencepiece"])
+    
     tok_id = config.model.tokenizer_id
     
     # support 'repo:subfolder' format
     if isinstance(tok_id, str) and ":" in tok_id and not tok_id.startswith("http"):
         repo, subfolder = tok_id.split(":", 1)
+        print(f"[INFO] Loading tokenizer from repo:subfolder format: {repo}:{subfolder}", file=sys.stderr, flush=True)
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 repo,
                 subfolder=subfolder,
                 trust_remote_code=config.model.trust_remote_code,
+                use_fast=False,  # Force slow tokenizer to avoid backend issues
             )
-        except ValueError as e:
-            if "sentencepiece or tiktoken" in str(e):
-                # Fallback: try loading without fast tokenizer
-                print(f"[WARNING] Fast tokenizer loading failed, attempting slow tokenizer: {e}", flush=True)
-                tokenizer = AutoTokenizer.from_pretrained(
-                    repo,
-                    subfolder=subfolder,
-                    trust_remote_code=config.model.trust_remote_code,
-                    use_fast=False,
-                )
-            else:
-                raise
+            print(f"[INFO] Successfully loaded tokenizer from {repo}:{subfolder}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[ERROR] Failed to load tokenizer: {e}", file=sys.stderr, flush=True)
+            raise
     else:
+        print(f"[INFO] Loading tokenizer from: {tok_id}", file=sys.stderr, flush=True)
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 tok_id,
                 trust_remote_code=config.model.trust_remote_code,
+                use_fast=False,  # Force slow tokenizer to avoid backend issues
             )
-        except ValueError as e:
-            if "sentencepiece or tiktoken" in str(e):
-                # Fallback: try loading without fast tokenizer
-                print(f"[WARNING] Fast tokenizer loading failed, attempting slow tokenizer: {e}", flush=True)
-                tokenizer = AutoTokenizer.from_pretrained(
-                    tok_id,
-                    trust_remote_code=config.model.trust_remote_code,
-                    use_fast=False,
-                )
-            else:
-                raise
+            print(f"[INFO] Successfully loaded tokenizer from {tok_id}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[ERROR] Failed to load tokenizer: {e}", file=sys.stderr, flush=True)
+            raise
     
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
