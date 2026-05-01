@@ -13,7 +13,7 @@
     "vision_field_candidates": ["vision_features", "image_features", "obs.vision", "observation.vision", "pixels", "image"],
     "vision_feature_dim": 48,
     "max_length": 512,
-    "mapping_table_path": "artifacts/step1/mock/token_id_mapping.csv",
+    "mapping_table_path": "https://huggingface.co/Infinity08/choonsik-step1/resolve/main/token_id_mapping.csv",
     "eval_holdout_ratio": 0.1,
     "enforce_distinct_eval_split": true,
     "require_step1_artifacts": true,
@@ -24,7 +24,7 @@
   },
   "model": {
     "base_model_id": "Qwen/Qwen3.5-9B-Instruct",
-    "tokenizer_id": "artifacts/step1/mock/target_tokenizer_after",
+    "tokenizer_id": "Infinity08/choonsik-step1:target_tokenizer_after",
     "trust_remote_code": true,
     "use_4bit": true,
     "bnb_4bit_quant_type": "nf4",
